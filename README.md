@@ -5,7 +5,9 @@ A lightweight, automatic game time tracker for Arknights: Endfield that runs sil
 ## What It Does
 
 - **Automatic tracking**: Monitors the `Endfield.exe` process and automatically tracks how long you play
+- **Live dashboard**: Opens a dark-themed HTML dashboard in your browser when the game starts, showing a live "NOW PLAYING" banner, session history, and total playtime
 - **Session notifications**: Shows a Windows toast notification when you close the game, displaying your session time and total playtime
+- **Playtime log**: Generates a human-readable `playtime.txt` with sessions grouped by date
 - **Crash recovery**: Safely handles unexpected shutdowns or crashes without losing your data
 - **Zero maintenance**: Once installed, it runs automatically on login and requires no user interaction
 
@@ -15,27 +17,26 @@ The tracker polls every 5 seconds to check if `Endfield.exe` is running. When th
 
 ## Installation
 
+### Prerequisites
+
+- [Node.js](https://nodejs.org) must be installed (LTS version recommended)
+
+### Setup
+
+1. Right-click `install.bat` and select **Run as administrator**
+2. Double-click `launcher.vbs` to start the tracker for the first time
+
+The installer creates a Windows scheduled task so the tracker starts automatically on future logins. Since the scheduled task only triggers on logon, you need to launch it manually the first time (or log out and back in).
+
 ### Testing Manually
 
-To test the tracker before installing:
+To test the tracker with visible log output:
 
 ```bash
 node tracker.js
 ```
 
 The tracker will run in your terminal and display log messages. Start and stop the game to verify it's working correctly.
-
-### Prerequisites
-
-- [Node.js](https://nodejs.org) must be installed (LTS version recommended)
-
-### Installing for Auto-Start
-
-1. Right-click `install.bat` and select **Run as administrator**
-2. The tracker will be configured to start automatically when you log in to Windows
-3. No additional setup required
-
-The installer creates a scheduled task that launches the tracker silently using the VBScript launcher.
 
 ### Uninstalling
 
@@ -44,7 +45,8 @@ Run `uninstall.bat` to remove the automatic startup task. Your playtime data wil
 ## Usage
 
 - **Background operation**: The tracker runs silently with no visible window
-- **Automatic notifications**: When you close the game, a notification appears showing:
+- **Live dashboard**: When the game starts, a dashboard opens in your default browser showing real-time session info (auto-refreshes every 5 seconds while playing)
+- **Automatic notifications**: When you close the game, a Windows toast notification appears showing:
   - Session time (how long you played this session)
   - Total time (your cumulative playtime)
 - **No interaction needed**: Everything happens automatically
@@ -62,14 +64,16 @@ Full path: `C:\Users\<YourUsername>\AppData\Local\endfield-tracker\data.json`
 
 ### Checking Your Playtime
 
-**Option 1**: Look at the notification when you close the game
+**Option 1**: Open `dashboard.html` in your browser — it's auto-generated in the project folder with a full session history
 
-**Option 2**: Open `data.json` in a text editor to see:
+**Option 2**: Check `playtime.txt` in the project folder — a human-readable log grouped by date
+
+**Option 3**: Look at the notification when you close the game
+
+**Option 4**: Open `data.json` in a text editor to see:
 - `totalSeconds`: Your total playtime in seconds
 - `sessions`: Array of all your gaming sessions with timestamps
 - `activeSession`: Present if a session is currently running (interim saves)
-
-**Option 3**: Check Task Manager for the `node.exe` process running `tracker.js` (if active)
 
 ### Initial Offset
 
@@ -151,6 +155,8 @@ endfield-tracker/
 ├── launcher.vbs     # Silent launcher (no console window)
 ├── install.bat      # Installation script
 ├── uninstall.bat    # Uninstallation script
+├── dashboard.html   # Auto-generated live dashboard (opened in browser)
+├── playtime.txt     # Auto-generated human-readable playtime log
 └── README.md        # This file
 ```
 
