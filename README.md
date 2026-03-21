@@ -25,6 +25,10 @@ node tracker.js
 
 The tracker will run in your terminal and display log messages. Start and stop the game to verify it's working correctly.
 
+### Prerequisites
+
+- [Node.js](https://nodejs.org) must be installed (LTS version recommended)
+
 ### Installing for Auto-Start
 
 1. Right-click `install.bat` and select **Run as administrator**
