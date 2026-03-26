@@ -16,7 +16,11 @@ var activeTab = "calendar", allPage = 0, DAYS_PER_PAGE = 5;
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function fmt(seconds) {
-  return Math.floor(seconds / 3600) + "h " + Math.floor((seconds % 3600) / 60) + "m";
+  var h = Math.floor(seconds / 3600);
+  var m = Math.floor((seconds % 3600) / 60);
+  var s = seconds % 60;
+  if (seconds < 300) return h + "h " + m + "m " + s + "s";
+  return h + "h " + m + "m";
 }
 
 function fmtTime(iso) {
@@ -44,15 +48,17 @@ function buildGrouped(sessions, initialOffset) {
   var g = [], m = {};
   for (var i = 0; i < sessions.length; i++) {
     var s = sessions[i];
-    var dk = new Date(s.startTime).toLocaleDateString("en-US", {
+    var dt = new Date(s.startTime);
+    var key = dt.getFullYear() + "-" + (dt.getMonth() + 1) + "-" + dt.getDate();
+    var display = dt.toLocaleDateString("en-US", {
       year: "numeric", month: "long", day: "numeric"
     });
-    if (!(dk in m)) {
-      m[dk] = g.length;
-      g.push({ date: dk, sessions: [], dayTotal: 0, runningTotal: 0 });
+    if (!(key in m)) {
+      m[key] = g.length;
+      g.push({ date: display, key: key, sessions: [], dayTotal: 0, runningTotal: 0 });
     }
-    g[m[dk]].sessions.push(s);
-    g[m[dk]].dayTotal += s.duration;
+    g[m[key]].sessions.push(s);
+    g[m[key]].dayTotal += s.duration;
   }
   var rt = initialOffset;
   for (var i = 0; i < g.length; i++) {
@@ -68,8 +74,7 @@ function getPlayedDates() {
   var map = {};
   if (!grouped) return map;
   for (var i = 0; i < grouped.length; i++) {
-    var d = new Date(grouped[i].date);
-    map[d.getFullYear() + "-" + (d.getMonth() + 1) + "-" + d.getDate()] = i;
+    map[grouped[i].key] = i;
   }
   return map;
 }
@@ -89,8 +94,19 @@ function computeStats() {
   var streak = 0;
   var today = new Date();
   today.setHours(0, 0, 0, 0);
-  for (var i = 0; i < grouped.length; i++) {
-    var gd = new Date(grouped[i].date);
+  var todayKey = today.getFullYear() + "-" + (today.getMonth() + 1) + "-" + today.getDate();
+
+  // Check if today is already in grouped or if a live session covers today
+  var todayInGrouped = grouped.length > 0 && grouped[0].key === todayKey;
+  var liveCoverToday = liveEpoch && !todayInGrouped;
+
+  var streakDates = [];
+  if (liveCoverToday) streakDates.push(todayKey);
+  for (var i = 0; i < grouped.length; i++) streakDates.push(grouped[i].key);
+
+  for (var i = 0; i < streakDates.length; i++) {
+    var parts = streakDates[i].split("-");
+    var gd = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
     gd.setHours(0, 0, 0, 0);
     var expected = new Date(today);
     expected.setDate(expected.getDate() - i);
@@ -110,11 +126,35 @@ function computeStats() {
   }
   if (cur > bestStreak) bestStreak = cur;
 
+  // Longest session
+  var longest = 0;
+  for (var i = 0; i < allSessions.length; i++) {
+    if (allSessions[i].duration > longest) longest = allSessions[i].duration;
+  }
+
+  // This week vs last week
+  var now = new Date();
+  var startOfWeek = new Date(now);
+  startOfWeek.setHours(0, 0, 0, 0);
+  startOfWeek.setDate(startOfWeek.getDate() - startOfWeek.getDay());
+  var startOfLastWeek = new Date(startOfWeek);
+  startOfLastWeek.setDate(startOfLastWeek.getDate() - 7);
+  var thisWeek = 0, lastWeek = 0;
+  for (var i = 0; i < allSessions.length; i++) {
+    var st = new Date(allSessions[i].startTime).getTime();
+    if (st >= startOfWeek.getTime()) thisWeek += allSessions[i].duration;
+    else if (st >= startOfLastWeek.getTime()) lastWeek += allSessions[i].duration;
+  }
+  var trend = lastWeek > 0 ? Math.round(((thisWeek - lastWeek) / lastWeek) * 100) : (thisWeek > 0 ? 100 : 0);
+  var trendStr = (trend > 0 ? "\u2191" + trend + "%" : trend < 0 ? "\u2193" + Math.abs(trend) + "%" : "\u2194");
+
   var stats = [
     { v: fmt(avgSess), l: "Avg Session" },
-    { v: fmt(avgDay),  l: "Avg / Day" },
+    { v: fmt(longest), l: "Longest" },
     { v: streak + (streak > 0 ? "\uD83D\uDD25" : ""), l: "Streak" },
-    { v: bestStreak + "", l: "Best Streak" }
+    { v: bestStreak + "", l: "Best Streak" },
+    { v: fmt(thisWeek), l: "This Week" },
+    { v: trendStr, l: "vs Last Week" }
   ];
 
   for (var i = 0; i < stats.length; i++) {
@@ -125,6 +165,66 @@ function computeStats() {
     div.appendChild(lab);
     el.appendChild(div);
   }
+
+  // Time-of-day heatmap
+  renderTimeHeatmap();
+}
+
+// ── Time-of-Day Heatmap ──────────────────────────────────────────────────────
+
+function renderTimeHeatmap() {
+  var container = document.getElementById("time-heatmap");
+  if (!container) return;
+  container.textContent = "";
+  if (!allSessions || !allSessions.length) return;
+
+  // Accumulate minutes per hour bucket
+  var hours = new Array(24);
+  for (var i = 0; i < 24; i++) hours[i] = 0;
+
+  for (var i = 0; i < allSessions.length; i++) {
+    var s = allSessions[i];
+    var start = new Date(s.startTime);
+    var end = new Date(s.endTime);
+    // Walk each minute of the session and bucket it
+    var cursor = new Date(start);
+    var remaining = s.duration;
+    while (remaining > 0) {
+      var h = cursor.getHours();
+      var secsLeftInHour = 3600 - cursor.getMinutes() * 60 - cursor.getSeconds();
+      var chunk = Math.min(remaining, secsLeftInHour);
+      hours[h] += chunk;
+      remaining -= chunk;
+      cursor = new Date(cursor.getTime() + chunk * 1000);
+    }
+  }
+
+  var max = 1;
+  for (var i = 0; i < 24; i++) if (hours[i] > max) max = hours[i];
+
+  var title = createEl("div", "heatmap-title");
+  title.textContent = "Play Time by Hour";
+  container.appendChild(title);
+
+  var grid = createEl("div", "heatmap-grid");
+  for (var i = 0; i < 24; i++) {
+    var col = createEl("div", "heatmap-col");
+    var bar = createEl("div", "heatmap-bar");
+    var pct = hours[i] > 0 ? Math.max(4, Math.round((hours[i] / max) * 100)) : 0;
+    bar.style.height = pct + "%";
+    var intensity = hours[i] / max;
+    if (intensity > 0.66) bar.className += " h3";
+    else if (intensity > 0.33) bar.className += " h2";
+    else if (intensity > 0) bar.className += " h1";
+    col.appendChild(bar);
+
+    var lbl = createEl("div", "heatmap-label");
+    lbl.textContent = (i < 10 ? "0" : "") + i;
+    col.appendChild(lbl);
+
+    grid.appendChild(col);
+  }
+  container.appendChild(grid);
 }
 
 // ── Calendar ──────────────────────────────────────────────────────────────────
@@ -195,7 +295,7 @@ function renderCalendar() {
     if (key in played) {
       cell.className += " has-sessions";
       var dt = grouped[played[key]].dayTotal;
-      var tier = dt < 3600 ? "t1" : dt < 10800 ? "t2" : "t3";
+      var tier = dt < 3600 ? "t1" : dt < 10800 ? "t2" : dt < 21600 ? "t3" : "t4";
       var dot = createEl("span", "cal-dot " + tier);
       cell.appendChild(dot);
       cell.onclick = (function(k) {

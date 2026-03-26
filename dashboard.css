@@ -75,6 +75,28 @@ h1 {
   margin-top: 0.75rem;
 }
 
+/* ── Share Button ─────────────────────────────────────────────── */
+
+.share-btn {
+  margin-top: 0.75rem;
+  background: #1e1e1e;
+  color: #aaa;
+  border: 1px solid #333;
+  border-radius: 6px;
+  padding: 0.4rem 1rem;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 0.75rem;
+  letter-spacing: 0.03em;
+  transition: background 0.2s, color 0.2s;
+}
+
+.share-btn:hover {
+  background: #2a2a2a;
+  color: #fff;
+  border-color: #4caf50;
+}
+
 /* ── Stats Row ─────────────────────────────────────────────────── */
 
 .stats-row {
@@ -416,7 +438,7 @@ td:last-child {
   color: #fff;
 }
 
-/* Calendar dot heatmap: t1 = <1h, t2 = 1-3h, t3 = >3h */
+/* Calendar dot heatmap: t1 = <1h, t2 = 1-3h, t3 = 3-6h, t4 = >6h (marathon) */
 .cal-dot {
   width: 4px;
   height: 4px;
@@ -427,6 +449,59 @@ td:last-child {
 .cal-dot.t1 { background: #2e7d32; }
 .cal-dot.t2 { background: #4caf50; }
 .cal-dot.t3 { background: #69f0ae; }
+.cal-dot.t4 { background: #00e5ff; box-shadow: 0 0 4px #00e5ff; }
+
+/* ── Time-of-Day Heatmap ──────────────────────────────────────── */
+
+.heatmap-widget {
+  margin-bottom: 1.5rem;
+  padding: 1rem;
+  background: #181818;
+  border: 1px solid #222;
+  border-radius: 8px;
+}
+
+.heatmap-title {
+  font-size: 0.7rem;
+  color: #555;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  text-align: center;
+  margin-bottom: 0.75rem;
+}
+
+.heatmap-grid {
+  display: flex;
+  gap: 2px;
+  align-items: flex-end;
+  height: 60px;
+}
+
+.heatmap-col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  height: 100%;
+  justify-content: flex-end;
+}
+
+.heatmap-bar {
+  width: 100%;
+  border-radius: 2px 2px 0 0;
+  min-width: 4px;
+  transition: height 0.3s;
+}
+
+.heatmap-bar.h1 { background: #2e7d32; }
+.heatmap-bar.h2 { background: #4caf50; }
+.heatmap-bar.h3 { background: #69f0ae; }
+
+.heatmap-label {
+  font-size: 0.5rem;
+  color: #444;
+  margin-top: 2px;
+}
 
 /* ── Status Bar ────────────────────────────────────────────────── */
 
