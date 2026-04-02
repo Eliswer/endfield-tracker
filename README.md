@@ -5,7 +5,7 @@ A lightweight, automatic game time tracker for Arknights: Endfield that runs sil
 ## What It Does
 
 - **Automatic tracking**: Monitors the `Endfield.exe` process and automatically tracks how long you play
-- **Live dashboard**: Opens a dark-themed HTML dashboard in your browser when the game starts, showing a live "NOW PLAYING" banner, session history, and total playtime
+- **Live dashboard**: Opens a real-time dashboard in your browser when the game starts, with a live timer, session history, and "NOW PLAYING" banner — updates instantly via Server-Sent Events, no page reloads
 - **Session notifications**: Shows a Windows toast notification when you close the game, displaying your session time and total playtime
 - **Playtime log**: Generates a human-readable `playtime.txt` with sessions grouped by date
 - **Crash recovery**: Safely handles unexpected shutdowns or crashes without losing your data
@@ -13,7 +13,7 @@ A lightweight, automatic game time tracker for Arknights: Endfield that runs sil
 
 ## How It Works
 
-The tracker polls every 5 seconds to check if `Endfield.exe` is running. When the game starts, it begins timing the session. When the game closes, it saves the session data and shows a notification with your playtime statistics. All data is stored locally in JSON format.
+The tracker polls every 5 seconds to check if `Endfield.exe` is running. When the game starts, it begins timing the session and opens a dashboard at `http://127.0.0.1:27182`. When the game closes, it saves the session data and shows a notification with your playtime statistics. All data is stored locally in JSON format.
 
 ## Installation
 
@@ -45,7 +45,7 @@ Run `uninstall.bat` to remove the automatic startup task. Your playtime data wil
 ## Usage
 
 - **Background operation**: The tracker runs silently with no visible window
-- **Live dashboard**: When the game starts, a dashboard opens in your default browser showing real-time session info (auto-refreshes every 5 seconds while playing)
+- **Live dashboard**: When the game starts, a dashboard opens at `http://127.0.0.1:27182` with real-time session info — the timer ticks live every second, no page refreshes needed
 - **Automatic notifications**: When you close the game, a Windows toast notification appears showing:
   - Session time (how long you played this session)
   - Total time (your cumulative playtime)
@@ -64,7 +64,7 @@ Full path: `C:\Users\<YourUsername>\AppData\Local\endfield-tracker\data.json`
 
 ### Checking Your Playtime
 
-**Option 1**: Open `dashboard.html` in your browser — it's auto-generated in the project folder with a full session history
+**Option 1**: Open `http://127.0.0.1:27182` in your browser (while the tracker is running) for the full dashboard
 
 **Option 2**: Check `playtime.txt` in the project folder — a human-readable log grouped by date
 
@@ -91,6 +91,12 @@ Alternatively, check if the scheduled task exists:
 ```bash
 schtasks /query /tn "EndfieldTracker"
 ```
+
+### Dashboard doesn't load
+
+- Make sure the tracker is running (see above)
+- Try opening `http://127.0.0.1:27182` manually in your browser
+- If the port is in use, the tracker will try the next port — check the log output for the actual URL
 
 ### Notifications don't appear
 
@@ -123,15 +129,18 @@ Open the data file at `%LOCALAPPDATA%\endfield-tracker\data.json` and look at th
 - `child_process`: Process monitoring via Windows `tasklist`
 - `fs`: File system operations for data persistence
 - `path`: Path handling
+- `http`: Local dashboard server
 
 ### Resource Usage
 
 - **Memory**: ~35MB RAM (minimal footprint)
 - **CPU**: Negligible (polls every 5 seconds)
 - **Disk**: <1MB (data file is typically a few KB)
+- **Network**: Local only — the HTTP server binds to `127.0.0.1` and is not accessible from other machines
 
 ### Features
 
+- **Live dashboard**: Real-time updates via Server-Sent Events (no page reloads)
 - **Interim saves**: Every 60 seconds while playing (prevents data loss)
 - **Crash recovery**: Automatically finalizes incomplete sessions on next startup
 - **Session history**: Maintains last 100 sessions with timestamps
@@ -146,16 +155,16 @@ Default settings (in `tracker.js`):
 - Interim save: Every 60 seconds
 - Initial offset: 0 (configurable)
 - Max sessions: 100
+- Dashboard port: 27182
 
 ## File Structure
 
 ```
 endfield-tracker/
-├── tracker.js       # Main tracker script
+├── tracker.js       # Main tracker script (includes HTTP server)
 ├── launcher.vbs     # Silent launcher (no console window)
 ├── install.bat      # Installation script
 ├── uninstall.bat    # Uninstallation script
-├── dashboard.html   # Auto-generated live dashboard (opened in browser)
 ├── playtime.txt     # Auto-generated human-readable playtime log
 └── README.md        # This file
 ```

@@ -1,28 +1,33 @@
 /**
  * Arknights: Endfield Game Time Tracker
  * Tracks game process runtime and maintains session history
+ * Serves a live dashboard via local HTTP server with Server-Sent Events
  */
 
-const { execSync, exec } = require('child_process');
+const { exec } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const http = require('http');
 
 // Configuration
 const CONFIG = {
+  gameName: 'Arknights: Endfield',
+  appName: 'endfield-tracker',
   processName: 'Endfield.exe',
   pollInterval: 5000,
   interimSaveInterval: 60000, // 60 seconds
+  minSessionDuration: 30, // seconds — sessions shorter than this are discarded
   initialOffset: 0,
   maxSessions: 100,
-  dataDir: path.join(process.env.LOCALAPPDATA, 'endfield-tracker'),
+  port: 27182,
+  get dataDir() {
+    return path.join(process.env.LOCALAPPDATA, this.appName);
+  },
   get dataFile() {
     return path.join(this.dataDir, 'data.json');
   },
   get playtimeFile() {
-    return path.join(__dirname, 'playtime.txt');
-  },
-  get dashboardFile() {
-    return path.join(__dirname, 'dashboard.html');
+    return path.join(this.dataDir, 'playtime.txt');
   }
 };
 
@@ -31,23 +36,23 @@ let isGameRunning = false;
 let sessionStartTime = null;
 let tickCount = 0;
 let data = null; // loaded once, kept in memory
-let dashboardOpened = false; // whether browser was opened for current session
+let dashboardOpened = false; // whether browser was opened this tracker run
+let sseClients = []; // active SSE connections
 const TICKS_PER_SAVE = CONFIG.interimSaveInterval / CONFIG.pollInterval; // 12 ticks
 
 /**
  * Formats seconds into "Xh Ym" format
- * @param {number} seconds - Total seconds
- * @returns {string} Formatted time string
  */
 function formatTime(seconds) {
   const hours = Math.floor(seconds / 3600);
   const minutes = Math.floor((seconds % 3600) / 60);
+  const secs = seconds % 60;
+  if (seconds < 300) return hours + 'h ' + minutes + 'm ' + secs + 's';
   return hours + 'h ' + minutes + 'm';
 }
 
 /**
  * Logs a message with timestamp
- * @param {string} msg - Message to log
  */
 function log(msg) {
   const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
@@ -66,7 +71,6 @@ function ensureDataDirectory() {
 
 /**
  * Loads data from JSON file (called once at startup)
- * @returns {Object} Data object with totalSeconds, sessions, lastSaveTime, version
  */
 function loadData() {
   ensureDataDirectory();
@@ -95,7 +99,6 @@ function loadData() {
     log('Error loading data (starting fresh): ' + err.message);
   }
 
-  // Return initial state if file doesn't exist or is corrupted
   return {
     version: '1.0',
     totalSeconds: CONFIG.initialOffset,
@@ -106,7 +109,6 @@ function loadData() {
 
 /**
  * Saves the in-memory data to JSON file
- * @param {boolean} isActiveSession - Whether to include active session marker for crash recovery
  */
 function saveData(isActiveSession = false) {
   ensureDataDirectory();
@@ -114,7 +116,6 @@ function saveData(isActiveSession = false) {
   const dataToSave = { ...data };
   dataToSave.lastSaveTime = new Date().toISOString();
 
-  // Add active session marker for crash recovery (time is NOT added to totalSeconds yet)
   if (isActiveSession && sessionStartTime) {
     const currentDuration = Math.floor((Date.now() - sessionStartTime) / 1000);
     dataToSave.activeSession = {
@@ -126,7 +127,6 @@ function saveData(isActiveSession = false) {
     delete dataToSave.activeSession;
   }
 
-  // Trim sessions to max limit
   if (dataToSave.sessions.length > CONFIG.maxSessions) {
     dataToSave.sessions = dataToSave.sessions.slice(-CONFIG.maxSessions);
   }
@@ -135,32 +135,30 @@ function saveData(isActiveSession = false) {
 }
 
 /**
- * Checks if the game process is running
- * @returns {boolean} True if process is running
+ * Checks if the game process is running (async to avoid blocking the event loop)
  */
-function isProcessRunning() {
-  try {
-    const output = execSync(
-      'tasklist /FI "IMAGENAME eq ' + CONFIG.processName + '" /FO CSV /NH',
-      { encoding: 'utf8', windowsHide: true }
-    );
-    return output.includes('"' + CONFIG.processName + '"');
-  } catch (err) {
-    log('Error checking process: ' + err.message);
-    return false;
-  }
+function checkProcessRunning(callback) {
+  exec(
+    'tasklist /FI "IMAGENAME eq ' + CONFIG.processName + '" /FO CSV /NH',
+    { encoding: 'utf8', windowsHide: true },
+    function (err, stdout) {
+      if (err) {
+        log('Error checking process: ' + err.message);
+        callback(false);
+      } else {
+        callback(stdout.includes('"' + CONFIG.processName + '"'));
+      }
+    }
+  );
 }
 
 /**
  * Shows Windows toast notification
- * @param {number} sessionSeconds - Duration of completed session
- * @param {number} totalSeconds - Total tracked time
  */
 function showNotification(sessionSeconds, totalSeconds) {
   const sessionTime = formatTime(sessionSeconds);
   const totalTime = formatTime(totalSeconds);
 
-  // Write a temporary .ps1 script to avoid quote escaping issues
   const ps1Path = path.join(CONFIG.dataDir, 'notify.ps1');
   const ps1Content = [
     '[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null',
@@ -170,7 +168,7 @@ function showNotification(sessionSeconds, totalSeconds) {
     '<toast>',
     '  <visual>',
     '    <binding template="ToastGeneric">',
-    '      <text>Arknights: Endfield</text>',
+    '      <text>' + CONFIG.gameName + '</text>',
     '      <text>Session: ' + sessionTime + '</text>',
     '      <text>Total playtime: ' + totalTime + '</text>',
     '    </binding>',
@@ -182,22 +180,23 @@ function showNotification(sessionSeconds, totalSeconds) {
     '$xml = New-Object Windows.Data.Xml.Dom.XmlDocument',
     '$xml.LoadXml($template)',
     '$toast = New-Object Windows.UI.Notifications.ToastNotification $xml',
-    "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Endfield Tracker').Show($toast)"
+    "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('" + CONFIG.appName + "').Show($toast)"
   ].join('\n');
 
   fs.writeFileSync(ps1Path, ps1Content, 'utf8');
   exec('powershell -NoProfile -ExecutionPolicy Bypass -File "' + ps1Path + '"', { windowsHide: true }, (err) => {
-    if (err) {
-      log('Notification error: ' + err.message);
-    }
+    if (err) log('Notification error: ' + err.message);
+    fs.unlink(ps1Path, () => {});
   });
 }
 
 /**
- * Opens the dashboard HTML file in the default browser
+ * Opens the dashboard in the default browser (only once per tracker run)
  */
 function openDashboard() {
-  exec('start "" "' + CONFIG.dashboardFile + '"', { windowsHide: true });
+  if (dashboardOpened) return;
+  exec('rundll32 url.dll,FileProtocolHandler http://127.0.0.1:' + CONFIG.port, { windowsHide: true });
+  dashboardOpened = true;
   log('Opened dashboard in browser');
 }
 
@@ -205,41 +204,29 @@ function openDashboard() {
  * Regenerates the human-readable playtime log from session history
  */
 function writePlaytimeLog() {
-  const lines = ['=== Arknights: Endfield - Playtime Log ===', ''];
+  const lines = ['=== ' + CONFIG.gameName + ' - Playtime Log ===', ''];
 
   const sessionsByDate = new Map();
-
   for (const session of data.sessions) {
     const start = new Date(session.startTime);
     const dateKey = start.toLocaleDateString('en-US', {
       year: 'numeric', month: 'long', day: 'numeric'
     });
-
-    if (!sessionsByDate.has(dateKey)) {
-      sessionsByDate.set(dateKey, []);
-    }
+    if (!sessionsByDate.has(dateKey)) sessionsByDate.set(dateKey, []);
     sessionsByDate.get(dateKey).push(session);
   }
 
   let runningTotal = CONFIG.initialOffset;
-
   for (const [dateStr, sessions] of sessionsByDate) {
     lines.push(dateStr);
-
     for (const session of sessions) {
       const start = new Date(session.startTime);
       const end = new Date(session.endTime);
-      const startTime = start.toLocaleTimeString('en-US', {
-        hour: '2-digit', minute: '2-digit', hour12: false
-      });
-      const endTime = end.toLocaleTimeString('en-US', {
-        hour: '2-digit', minute: '2-digit', hour12: false
-      });
-
+      const startTime = start.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+      const endTime = end.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
       runningTotal += session.duration;
       lines.push('  Session: ' + startTime + ' - ' + endTime + ' (' + formatTime(session.duration) + ')');
     }
-
     lines.push('  Total: ' + formatTime(runningTotal));
     lines.push('');
   }
@@ -252,353 +239,330 @@ function writePlaytimeLog() {
   }
 }
 
+// ── SSE ──────────────────────────────────────────────────────────────────────
+
 /**
- * Generates a dark-themed HTML dashboard from session history
- * @param {Object} [liveSession] - Current live session info for real-time display
- * @param {number} liveSession.duration - Current session duration in seconds
- * @param {number} liveSession.startTime - Session start timestamp
+ * Broadcasts a Server-Sent Event to all connected clients
  */
-function writeDashboard(liveSession) {
-  // Group sessions by date
-  const sessionsByDate = new Map();
-  for (const session of data.sessions) {
-    const start = new Date(session.startTime);
-    const dateKey = start.toLocaleDateString('en-US', {
-      year: 'numeric', month: 'long', day: 'numeric'
-    });
-    if (!sessionsByDate.has(dateKey)) {
-      sessionsByDate.set(dateKey, []);
-    }
-    sessionsByDate.get(dateKey).push(session);
-  }
-
-  // Build live session banner
-  var liveBannerHtml = '';
-  var displayTotal = data.totalSeconds;
-  if (liveSession) {
-    displayTotal += liveSession.duration;
-    var liveStartTime = new Date(liveSession.startTime).toLocaleTimeString('en-US', {
-      hour: '2-digit', minute: '2-digit', hour12: false
-    });
-    liveBannerHtml = '      <div class="live-banner">\n' +
-      '        <div class="live-dot"></div>\n' +
-      '        <span class="live-label">NOW PLAYING</span>\n' +
-      '        <span class="live-info">Started ' + liveStartTime + ' &middot; Session: ' + formatTime(liveSession.duration) + '</span>\n' +
-      '      </div>\n';
-  }
-
-  // Build date sections HTML (newest first)
-  var runningTotals = [];
-  var runningTotal = CONFIG.initialOffset;
-  for (const [dateStr, sessions] of sessionsByDate) {
-    var dayTotal = 0;
-    for (const session of sessions) {
-      runningTotal += session.duration;
-      dayTotal += session.duration;
-    }
-    runningTotals.push({ dateStr: dateStr, sessions: sessions, dayTotal: dayTotal, runningTotal: runningTotal });
-  }
-  runningTotals.reverse();
-
-  var daysHtml = '';
-  for (var i = 0; i < runningTotals.length; i++) {
-    var day = runningTotals[i];
-    var rowsHtml = '';
-    for (var j = 0; j < day.sessions.length; j++) {
-      var session = day.sessions[j];
-      var start = new Date(session.startTime);
-      var end = new Date(session.endTime);
-      var startTime = start.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
-      var endTime = end.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
-      rowsHtml += '          <tr>\n' +
-        '            <td>' + startTime + '</td>\n' +
-        '            <td>' + endTime + '</td>\n' +
-        '            <td>' + formatTime(session.duration) + '</td>\n' +
-        '          </tr>\n';
-    }
-
-    var sessionCount = day.sessions.length;
-    var sessionLabel = sessionCount > 1 ? sessionCount + ' sessions' : '1 session';
-    daysHtml += '      <div class="day">\n' +
-      '        <div class="day-header">\n' +
-      '          <span class="day-date">' + day.dateStr + '</span>\n' +
-      '          <span class="day-stats">' + sessionLabel + ' &middot; ' + formatTime(day.dayTotal) + ' &middot; Total: ' + formatTime(day.runningTotal) + '</span>\n' +
-      '        </div>\n' +
-      '        <table>\n' +
-      '          <thead><tr><th>Start</th><th>End</th><th>Duration</th></tr></thead>\n' +
-      '          <tbody>\n' +
-      rowsHtml +
-      '          </tbody>\n' +
-      '        </table>\n' +
-      '      </div>\n';
-  }
-
-  var totalHours = Math.floor(displayTotal / 3600);
-  var totalMinutes = Math.floor((displayTotal % 3600) / 60);
-  var lastUpdated = new Date().toLocaleString('en-US', {
-    year: 'numeric', month: 'long', day: 'numeric',
-    hour: '2-digit', minute: '2-digit', hour12: false
+function broadcastSSE(eventType, eventData) {
+  const payload = 'event: ' + eventType + '\ndata: ' + JSON.stringify(eventData) + '\n\n';
+  sseClients = sseClients.filter(function (res) {
+    try { res.write(payload); return true; }
+    catch (e) { return false; }
   });
-  var refreshTag = liveSession ? '\n  <meta http-equiv="refresh" content="5">' : '';
-
-  var html = '<!DOCTYPE html>\n' +
-    '<html lang="en">\n' +
-    '<head>\n' +
-    '  <meta charset="UTF-8">\n' +
-    '  <meta name="viewport" content="width=device-width, initial-scale=1.0">' + refreshTag + '\n' +
-    '  <title>Endfield Playtime Tracker</title>\n' +
-    '  <style>\n' +
-    '    * { margin: 0; padding: 0; box-sizing: border-box; }\n' +
-    '    body {\n' +
-    '      font-family: "Segoe UI", system-ui, -apple-system, sans-serif;\n' +
-    '      background: #0f0f0f;\n' +
-    '      color: #e0e0e0;\n' +
-    '      min-height: 100vh;\n' +
-    '      padding: 2rem;\n' +
-    '    }\n' +
-    '    .bg-character {\n' +
-    '      position: fixed;\n' +
-    '      left: -60px;\n' +
-    '      bottom: 0;\n' +
-    '      height: 100vh;\n' +
-    '      width: auto;\n' +
-    '      opacity: 0.08;\n' +
-    '      pointer-events: none;\n' +
-    '      z-index: 0;\n' +
-    '      -webkit-mask-image: linear-gradient(to right, rgba(0,0,0,1) 40%, rgba(0,0,0,0) 100%);\n' +
-    '      mask-image: linear-gradient(to right, rgba(0,0,0,1) 40%, rgba(0,0,0,0) 100%);\n' +
-    '    }\n' +
-    '    .container { max-width: 720px; margin: 0 auto; position: relative; z-index: 1; }\n' +
-    '    header {\n' +
-    '      text-align: center;\n' +
-    '      margin-bottom: 2.5rem;\n' +
-    '      padding-bottom: 1.5rem;\n' +
-    '      border-bottom: 1px solid #2a2a2a;\n' +
-    '    }\n' +
-    '    h1 {\n' +
-    '      font-size: 1.4rem;\n' +
-    '      font-weight: 500;\n' +
-    '      color: #888;\n' +
-    '      margin-bottom: 1rem;\n' +
-    '      letter-spacing: 0.05em;\n' +
-    '      text-transform: uppercase;\n' +
-    '    }\n' +
-    '    .total-time {\n' +
-    '      font-size: 3.5rem;\n' +
-    '      font-weight: 700;\n' +
-    '      color: #fff;\n' +
-    '      line-height: 1;\n' +
-    '    }\n' +
-    '    .total-time .unit { font-size: 1.5rem; color: #666; font-weight: 400; }\n' +
-    '    .subtitle {\n' +
-    '      color: #555;\n' +
-    '      font-size: 0.85rem;\n' +
-    '      margin-top: 0.75rem;\n' +
-    '    }\n' +
-    '    .stats-row {\n' +
-    '      display: flex;\n' +
-    '      justify-content: center;\n' +
-    '      gap: 2rem;\n' +
-    '      margin-top: 1.25rem;\n' +
-    '    }\n' +
-    '    .stat { text-align: center; }\n' +
-    '    .stat-value { font-size: 1.3rem; font-weight: 600; color: #ccc; }\n' +
-    '    .stat-label { font-size: 0.75rem; color: #555; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 0.15rem; }\n' +
-    '    .live-banner {\n' +
-    '      display: flex;\n' +
-    '      align-items: center;\n' +
-    '      gap: 0.75rem;\n' +
-    '      padding: 0.85rem 1rem;\n' +
-    '      margin-bottom: 1rem;\n' +
-    '      background: #1a1a1a;\n' +
-    '      border: 1px solid #2d5a1e;\n' +
-    '      border-radius: 8px;\n' +
-    '    }\n' +
-    '    .live-dot {\n' +
-    '      width: 10px; height: 10px;\n' +
-    '      background: #4caf50;\n' +
-    '      border-radius: 50%;\n' +
-    '      animation: pulse 2s infinite;\n' +
-    '    }\n' +
-    '    @keyframes pulse {\n' +
-    '      0%, 100% { opacity: 1; }\n' +
-    '      50% { opacity: 0.4; }\n' +
-    '    }\n' +
-    '    .live-label {\n' +
-    '      font-size: 0.75rem;\n' +
-    '      font-weight: 700;\n' +
-    '      color: #4caf50;\n' +
-    '      letter-spacing: 0.08em;\n' +
-    '    }\n' +
-    '    .live-info { color: #888; font-size: 0.85rem; }\n' +
-    '    .day {\n' +
-    '      margin-bottom: 1rem;\n' +
-    '      background: #181818;\n' +
-    '      border-radius: 8px;\n' +
-    '      overflow: hidden;\n' +
-    '      border: 1px solid #222;\n' +
-    '    }\n' +
-    '    .day-header {\n' +
-    '      display: flex;\n' +
-    '      justify-content: space-between;\n' +
-    '      align-items: center;\n' +
-    '      padding: 0.75rem 1rem;\n' +
-    '      background: #1e1e1e;\n' +
-    '      border-bottom: 1px solid #222;\n' +
-    '    }\n' +
-    '    .day-date { font-weight: 600; color: #ddd; font-size: 0.95rem; }\n' +
-    '    .day-stats { color: #666; font-size: 0.8rem; }\n' +
-    '    table { width: 100%; border-collapse: collapse; }\n' +
-    '    th {\n' +
-    '      text-align: left;\n' +
-    '      padding: 0.5rem 1rem;\n' +
-    '      font-size: 0.7rem;\n' +
-    '      color: #555;\n' +
-    '      text-transform: uppercase;\n' +
-    '      letter-spacing: 0.05em;\n' +
-    '      font-weight: 500;\n' +
-    '    }\n' +
-    '    td {\n' +
-    '      padding: 0.5rem 1rem;\n' +
-    '      font-size: 0.9rem;\n' +
-    '      color: #bbb;\n' +
-    '      border-top: 1px solid #1a1a1a;\n' +
-    '      font-variant-numeric: tabular-nums;\n' +
-    '    }\n' +
-    '    tr:hover td { background: #1c1c1c; }\n' +
-    '    td:last-child { color: #fff; font-weight: 500; }\n' +
-    '  </style>\n' +
-    '</head>\n' +
-    '<body>\n' +
-    '  <img class="bg-character" src="https://endfield.wiki.gg/images/Laevatain_Splash_Art.png?2400ae" alt="">\n' +
-    '  <div class="container">\n' +
-    '    <header>\n' +
-    '      <h1>Arknights: Endfield</h1>\n' +
-    '      <div class="total-time">' + totalHours + '<span class="unit">h</span> ' + totalMinutes + '<span class="unit">m</span></div>\n' +
-    '      <div class="stats-row">\n' +
-    '        <div class="stat">\n' +
-    '          <div class="stat-value">' + data.sessions.length + '</div>\n' +
-    '          <div class="stat-label">Sessions</div>\n' +
-    '        </div>\n' +
-    '        <div class="stat">\n' +
-    '          <div class="stat-value">' + sessionsByDate.size + '</div>\n' +
-    '          <div class="stat-label">Days Played</div>\n' +
-    '        </div>\n' +
-    '      </div>\n' +
-    '      <div class="subtitle">Last updated: ' + lastUpdated + '</div>\n' +
-    '    </header>\n' +
-    liveBannerHtml + daysHtml +
-    '  </div>\n' +
-    '</body>\n' +
-    '</html>';
-
-  try {
-    fs.writeFileSync(CONFIG.dashboardFile, html, 'utf8');
-  } catch (e) {
-    log('Error writing dashboard: ' + e.message);
-  }
 }
+
+/**
+ * Returns a snapshot of the current tracker state for the dashboard
+ */
+function getDashboardData() {
+  var liveSession = null;
+  if (isGameRunning && sessionStartTime) {
+    liveSession = {
+      duration: Math.floor((Date.now() - sessionStartTime) / 1000),
+      startTime: sessionStartTime
+    };
+  }
+  return {
+    gameName: CONFIG.gameName,
+    totalSeconds: data.totalSeconds,
+    sessions: data.sessions,
+    initialOffset: CONFIG.initialOffset,
+    liveSession: liveSession,
+    lastUpdated: new Date().toISOString()
+  };
+}
+
+// Dashboard static files cached in memory at startup
+var STATIC_FILES = {};
+(function loadStaticFiles() {
+  var files = {
+    '/': { path: 'dashboard.html', type: 'text/html; charset=utf-8', encoding: 'utf8' },
+    '/dashboard.css': { path: 'dashboard.css', type: 'text/css; charset=utf-8', encoding: 'utf8' },
+    '/dashboard.js': { path: 'dashboard.js', type: 'application/javascript; charset=utf-8', encoding: 'utf8' },
+    '/bg.png': { path: 'bg.png', type: 'image/png', encoding: null, cache: 'public, max-age=86400' }
+  };
+  for (var route in files) {
+    var f = files[route];
+    var fullPath = path.join(__dirname, f.path);
+    try {
+      var content = f.encoding ? fs.readFileSync(fullPath, f.encoding) : fs.readFileSync(fullPath);
+      STATIC_FILES[route] = { content: content, type: f.type };
+      if (f.cache) STATIC_FILES[route].cache = f.cache;
+    } catch (e) {
+      log('Warning: missing dashboard file: ' + f.path + ' — dashboard may not render correctly');
+    }
+  }
+})();
+
+// ── Shareable Stats Card ─────────────────────────────────────────────────────
+
+function generateShareCard() {
+  var total = data.totalSeconds;
+  var hours = Math.floor(total / 3600);
+  var minutes = Math.floor((total % 3600) / 60);
+  var sessionCount = data.sessions.length;
+
+  // Compute days played
+  var daySet = {};
+  for (var i = 0; i < data.sessions.length; i++) {
+    var d = new Date(data.sessions[i].startTime);
+    daySet[d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate()] = true;
+  }
+  var daysPlayed = Object.keys(daySet).length;
+
+  // Longest session
+  var longest = 0;
+  for (var i = 0; i < data.sessions.length; i++) {
+    if (data.sessions[i].duration > longest) longest = data.sessions[i].duration;
+  }
+
+  // Current streak
+  var streak = 0;
+  var today = new Date();
+  today.setHours(0, 0, 0, 0);
+  var sortedDays = Object.keys(daySet).sort(function (a, b) {
+    var pa = a.split('-'), pb = b.split('-');
+    return new Date(pb[0], pb[1] - 1, pb[2]) - new Date(pa[0], pa[1] - 1, pa[2]);
+  });
+  for (var i = 0; i < sortedDays.length; i++) {
+    var parts = sortedDays[i].split('-');
+    var gd = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+    gd.setHours(0, 0, 0, 0);
+    var expected = new Date(today);
+    expected.setDate(expected.getDate() - i);
+    if (gd.getTime() === expected.getTime()) streak++;
+    else break;
+  }
+
+  // Weekly playtime bars (last 7 days)
+  var weekBars = [];
+  var maxDay = 1;
+  for (var d = 6; d >= 0; d--) {
+    var day = new Date(today);
+    day.setDate(day.getDate() - d);
+    var key = day.getFullYear() + '-' + (day.getMonth() + 1) + '-' + day.getDate();
+    var dayTotal = 0;
+    for (var j = 0; j < data.sessions.length; j++) {
+      var sd = new Date(data.sessions[j].startTime);
+      var sk = sd.getFullYear() + '-' + (sd.getMonth() + 1) + '-' + sd.getDate();
+      if (sk === key) dayTotal += data.sessions[j].duration;
+    }
+    if (dayTotal > maxDay) maxDay = dayTotal;
+    weekBars.push({ label: ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][day.getDay()], value: dayTotal });
+  }
+
+  var barMaxH = 60;
+  var barsXml = '';
+  for (var i = 0; i < weekBars.length; i++) {
+    var bh = weekBars[i].value > 0 ? Math.max(4, Math.round((weekBars[i].value / maxDay) * barMaxH)) : 0;
+    var bx = 30 + i * 50;
+    var by = 255 - bh;
+    if (bh > 0) {
+      barsXml += '<rect x="' + bx + '" y="' + by + '" width="30" height="' + bh + '" rx="3" fill="#4caf50" opacity="0.8"/>';
+    }
+    barsXml += '<text x="' + (bx + 15) + '" y="272" text-anchor="middle" fill="#666" font-size="10">' + weekBars[i].label + '</text>';
+  }
+
+  return [
+    '<svg xmlns="http://www.w3.org/2000/svg" width="400" height="290" viewBox="0 0 400 290">',
+    '<defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#1a1a2e"/><stop offset="100%" stop-color="#0f0f0f"/></linearGradient></defs>',
+    '<rect width="400" height="290" rx="16" fill="url(#bg)"/>',
+    '<rect x="0.5" y="0.5" width="399" height="289" rx="16" fill="none" stroke="#2a2a2a"/>',
+    '',
+    '<text x="200" y="32" text-anchor="middle" fill="#666" font-family="Segoe UI,sans-serif" font-size="11" letter-spacing="1.5">' + CONFIG.gameName.toUpperCase() + '</text>',
+    '',
+    '<text x="200" y="72" text-anchor="middle" fill="#fff" font-family="Segoe UI,sans-serif" font-size="38" font-weight="700">' + hours + '<tspan fill="#555" font-size="18" font-weight="400">h </tspan>' + minutes + '<tspan fill="#555" font-size="18" font-weight="400">m</tspan></text>',
+    '',
+    '<line x1="40" y1="88" x2="360" y2="88" stroke="#222" stroke-width="1"/>',
+    '',
+    '<text x="80" y="112" text-anchor="middle" fill="#ccc" font-family="Segoe UI,sans-serif" font-size="14" font-weight="600">' + sessionCount + '</text>',
+    '<text x="80" y="126" text-anchor="middle" fill="#555" font-family="Segoe UI,sans-serif" font-size="9" letter-spacing="0.5">SESSIONS</text>',
+    '',
+    '<text x="170" y="112" text-anchor="middle" fill="#ccc" font-family="Segoe UI,sans-serif" font-size="14" font-weight="600">' + daysPlayed + '</text>',
+    '<text x="170" y="126" text-anchor="middle" fill="#555" font-family="Segoe UI,sans-serif" font-size="9" letter-spacing="0.5">DAYS</text>',
+    '',
+    '<text x="250" y="112" text-anchor="middle" fill="#ccc" font-family="Segoe UI,sans-serif" font-size="14" font-weight="600">' + formatTime(longest) + '</text>',
+    '<text x="250" y="126" text-anchor="middle" fill="#555" font-family="Segoe UI,sans-serif" font-size="9" letter-spacing="0.5">LONGEST</text>',
+    '',
+    '<text x="330" y="112" text-anchor="middle" fill="#ccc" font-family="Segoe UI,sans-serif" font-size="14" font-weight="600">' + streak + '\uD83D\uDD25</text>',
+    '<text x="330" y="126" text-anchor="middle" fill="#555" font-family="Segoe UI,sans-serif" font-size="9" letter-spacing="0.5">STREAK</text>',
+    '',
+    '<line x1="40" y1="140" x2="360" y2="140" stroke="#222" stroke-width="1"/>',
+    '',
+    '<text x="200" y="162" text-anchor="middle" fill="#555" font-family="Segoe UI,sans-serif" font-size="10" letter-spacing="0.5">LAST 7 DAYS</text>',
+    '',
+    barsXml,
+    '',
+    '</svg>'
+  ].join('\n');
+}
+
+// ── HTTP Server ──────────────────────────────────────────────────────────────
+
+/**
+ * Starts the local HTTP server for the dashboard
+ */
+function startServer() {
+  var server = http.createServer(function (req, res) {
+    // Serve static dashboard files
+    if (req.method === 'GET' && req.url in STATIC_FILES) {
+      var file = STATIC_FILES[req.url];
+      var headers = { 'Content-Type': file.type };
+      if (file.cache) headers['Cache-Control'] = file.cache;
+      res.writeHead(200, headers);
+      res.end(file.content);
+    }
+    else if (req.method === 'GET' && req.url === '/share') {
+      res.writeHead(200, { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'no-cache' });
+      res.end(generateShareCard());
+    }
+    else if (req.method === 'GET' && req.url === '/data') {
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' });
+      res.end(JSON.stringify(getDashboardData()));
+    }
+    else if (req.method === 'GET' && req.url === '/events') {
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive'
+      });
+      res.write('event: init\ndata: ' + JSON.stringify(getDashboardData()) + '\n\n');
+      sseClients.push(res);
+      var removeClient = function () {
+        sseClients = sseClients.filter(function (c) { return c !== res; });
+      };
+      req.on('close', removeClient);
+      req.on('error', removeClient);
+      res.on('error', removeClient);
+    }
+    else {
+      res.writeHead(404);
+      res.end('Not Found');
+    }
+  });
+
+  server.listen(CONFIG.port, '127.0.0.1', function () {
+    log('Dashboard: http://127.0.0.1:' + CONFIG.port);
+  });
+
+  server.on('error', function (err) {
+    if (err.code === 'EADDRINUSE') {
+      log('Port ' + CONFIG.port + ' already in use — another instance is likely running. Exiting.');
+      process.exit(0);
+    } else {
+      log('Server error: ' + err.message);
+    }
+  });
+}
+
+// ── Lifecycle ────────────────────────────────────────────────────────────────
 
 /**
  * Handles graceful shutdown
  */
 function handleShutdown() {
   log('Shutting down gracefully...');
+  broadcastSSE('shutdown', {});
 
   if (isGameRunning && sessionStartTime) {
     const sessionDuration = Math.floor((Date.now() - sessionStartTime) / 1000);
-    data.totalSeconds += sessionDuration;
-    data.sessions.push({
-      startTime: new Date(sessionStartTime).toISOString(),
-      endTime: new Date().toISOString(),
-      duration: sessionDuration
-    });
-    saveData(false);
-    writePlaytimeLog();
-    writeDashboard();
-    log('Saved active session: ' + formatTime(sessionDuration));
+    if (sessionDuration >= CONFIG.minSessionDuration) {
+      data.totalSeconds += sessionDuration;
+      data.sessions.push({
+        startTime: new Date(sessionStartTime).toISOString(),
+        endTime: new Date().toISOString(),
+        duration: sessionDuration
+      });
+      log('Saved active session: ' + formatTime(sessionDuration));
+    }
   }
 
+  saveData(false);
+  writePlaytimeLog();
   log('Shutdown complete');
   process.exit(0);
 }
 
 /**
- * Main polling loop
+ * Main polling loop (async process detection)
  */
 function pollProcess() {
-  const currentlyRunning = isProcessRunning();
+  checkProcessRunning(function (currentlyRunning) {
+    // Game just started
+    if (currentlyRunning && !isGameRunning) {
+      isGameRunning = true;
+      sessionStartTime = Date.now();
+      tickCount = 0;
+      log('Game started - session begin');
+      broadcastSSE('session-start', { startTime: sessionStartTime });
+      openDashboard();
+    }
+    // Game just stopped
+    else if (!currentlyRunning && isGameRunning) {
+      isGameRunning = false;
+      const sessionDuration = Math.floor((Date.now() - sessionStartTime) / 1000);
 
-  // State 1: Game just started
-  if (currentlyRunning && !isGameRunning) {
-    isGameRunning = true;
-    sessionStartTime = Date.now();
-    tickCount = 0;
-    dashboardOpened = false;
-    log('Game started - session begin');
+      if (sessionDuration >= CONFIG.minSessionDuration) {
+        data.totalSeconds += sessionDuration;
+        data.sessions.push({
+          startTime: new Date(sessionStartTime).toISOString(),
+          endTime: new Date().toISOString(),
+          duration: sessionDuration
+        });
+        saveData(false);
 
-    var liveSess = { duration: 0, startTime: sessionStartTime };
-    writeDashboard(liveSess);
-    openDashboard();
-    dashboardOpened = true;
-  }
-  // State 2: Game just stopped
-  else if (!currentlyRunning && isGameRunning) {
-    isGameRunning = false;
-    const sessionDuration = Math.floor((Date.now() - sessionStartTime) / 1000);
+        log('Game stopped - session: ' + formatTime(sessionDuration) + ', total: ' + formatTime(data.totalSeconds));
+        showNotification(sessionDuration, data.totalSeconds);
+        writePlaytimeLog();
+        broadcastSSE('session-end', {
+          totalSeconds: data.totalSeconds,
+          sessions: data.sessions,
+          initialOffset: CONFIG.initialOffset
+        });
+      } else {
+        log('Game stopped - session too short (' + sessionDuration + 's), discarded');
+        broadcastSSE('session-end', {
+          totalSeconds: data.totalSeconds,
+          sessions: data.sessions,
+          initialOffset: CONFIG.initialOffset
+        });
+      }
 
-    data.totalSeconds += sessionDuration;
-    data.sessions.push({
-      startTime: new Date(sessionStartTime).toISOString(),
-      endTime: new Date().toISOString(),
-      duration: sessionDuration
-    });
-    saveData(false);
-
-    log('Game stopped - session: ' + formatTime(sessionDuration) + ', total: ' + formatTime(data.totalSeconds));
-    showNotification(sessionDuration, data.totalSeconds);
-    writePlaytimeLog();
-    writeDashboard(); // no live session = no auto-refresh
-    dashboardOpened = false;
-
-    sessionStartTime = null;
-    tickCount = 0;
-  }
-  // State 3: Game still running - interim save every 60 seconds
-  else if (currentlyRunning && isGameRunning) {
-    var currentDuration = Math.floor((Date.now() - sessionStartTime) / 1000);
-    writeDashboard({ duration: currentDuration, startTime: sessionStartTime });
-
-    tickCount++;
-    if (tickCount >= TICKS_PER_SAVE) {
-      saveData(true);
-      log('Interim save - session: ' + formatTime(currentDuration));
+      sessionStartTime = null;
       tickCount = 0;
     }
-  }
-  // State 4: Game still not running - no action needed
+    // Game still running - interim save
+    else if (currentlyRunning && isGameRunning) {
+      tickCount++;
+      if (tickCount >= TICKS_PER_SAVE) {
+        var currentDuration = Math.floor((Date.now() - sessionStartTime) / 1000);
+        saveData(true);
+        log('Interim save - session: ' + formatTime(currentDuration));
+        tickCount = 0;
+      }
+    }
+  });
 }
 
-// Main execution
-log('Arknights: Endfield Tracker started');
+// ── Main ─────────────────────────────────────────────────────────────────────
+
+log(CONFIG.gameName + ' Tracker started');
 log('Process: ' + CONFIG.processName);
 log('Poll interval: ' + CONFIG.pollInterval + 'ms');
 log('Data file: ' + CONFIG.dataFile);
 
-// Load initial data and display status
 data = loadData();
 log('Current total time: ' + formatTime(data.totalSeconds));
 log('Sessions tracked: ' + data.sessions.length);
 
-// Regenerate playtime log and dashboard (handles crash recovery)
 writePlaytimeLog();
-writeDashboard();
 log('Playtime log: ' + CONFIG.playtimeFile);
 
-// Setup graceful shutdown handlers
+startServer();
+
 process.on('SIGTERM', handleShutdown);
 process.on('SIGINT', handleShutdown);
 
-// Start polling
 setInterval(pollProcess, CONFIG.pollInterval);
 log('Polling started');
