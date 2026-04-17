@@ -195,7 +195,7 @@ function showNotification(sessionSeconds, totalSeconds) {
  */
 function openDashboard() {
   if (dashboardOpened) return;
-  exec('rundll32 url.dll,FileProtocolHandler http://127.0.0.1:' + CONFIG.port, { windowsHide: true });
+  exec('start http://127.0.0.1:' + CONFIG.port, { windowsHide: true, shell: true });
   dashboardOpened = true;
   log('Opened dashboard in browser');
 }
