@@ -17,29 +17,75 @@ The tracker polls every 5 seconds to check if `Endfield.exe` is running. When th
 
 ## Installation
 
-### Prerequisites
+> New to this kind of thing? No worries — just follow the steps below in order. You do **not** need to know any programming.
 
-- [Node.js](https://nodejs.org) must be installed (LTS version recommended)
+### Step 1: Install Node.js
 
-### Setup
+Node.js is the engine that runs the tracker in the background. You only have to install it once.
 
-1. Right-click `setup.bat` and select **Run as administrator**
+1. Go to [https://nodejs.org](https://nodejs.org).
+2. Click the big green button for the **LTS** version (on the left). A `.msi` file will download.
+3. Open the downloaded file. The installer will launch.
+4. Click **Next** through every screen, accept the license, and keep all the default options. Click **Install** at the end.
+5. Windows will ask *"Do you want to allow this app to make changes to your device?"* — click **Yes**.
+6. When it says "Installation complete," click **Finish**. You're done — you don't need to open Node.js yourself; the tracker will use it automatically.
 
-That's it — the script creates a Windows scheduled task and starts the tracker immediately. On future logins, it starts automatically. Alternatively, you can run `install.bat` (same thing but without auto-launching) and then double-click `launcher.vbs` to start manually.
+**(Optional) Check it worked:** press `Win + R`, type `cmd`, and press Enter. In the black window that opens, type:
+
+```bash
+node --version
+```
+
+If you see something like `v20.11.0`, Node.js is installed correctly.
+
+### Step 2: Download the tracker
+
+1. Go to this project's GitHub page (the page where you're reading this README).
+2. Click the green **`< > Code`** button near the top.
+3. In the menu that opens, click **Download ZIP**. A ZIP file will download (usually to your `Downloads` folder).
+4. Open your `Downloads` folder and find the ZIP (something like `endfield-tracker-main.zip`).
+5. **Right-click** the ZIP → **Extract All…** → choose a location you'll remember, for example `C:\Users\<YourName>\Documents\endfield-tracker`. Avoid putting it on the **Desktop** or leaving it inside **Downloads** — Windows sometimes cleans those folders automatically, which would break the tracker.
+6. After extracting, open the new folder. You should see files like `setup.bat`, `tracker.js`, `launcher.vbs`, and this `README.md`.
+
+### Step 3: Run the installer
+
+1. In the extracted folder, find the file named **`setup.bat`**.
+2. **Right-click** it and choose **Run as administrator**.
+3. Windows will ask *"Do you want to allow this app to make changes to your device?"* — click **Yes**.
+4. A black console window will flash open briefly and then close. That's normal — the installer is quick.
+5. Your browser should automatically open the dashboard at [http://127.0.0.1:27182](http://127.0.0.1:27182). If it doesn't, open that link yourself in any browser.
+
+That's it — the tracker is now installed and will start automatically every time you log in to Windows. You never have to touch it again.
+
+> **Alternative:** if you'd rather not auto-start the tracker right now, run `install.bat` instead (same installation, no immediate launch). You can then start it manually any time by double-clicking `launcher.vbs`.
+
+### Step 4: Verify it's working
+
+- The dashboard at [http://127.0.0.1:27182](http://127.0.0.1:27182) should load. Before you've played, it will show zero sessions — that's fine.
+- Open **Task Manager** (press `Ctrl + Shift + Esc`) → go to the **Details** tab → scroll down and look for `node.exe`. If it's there, the tracker is running.
+- Launch Arknights: Endfield. Within a few seconds, a **NOW PLAYING** banner appears on the dashboard and the timer starts ticking. When you close the game, a Windows notification pops up with your session time.
+
+### (Optional) Editing configuration
+
+If you want to adjust settings later (for example, setting an `initialOffset` for playtime you had before installing the tracker), open `tracker.js` in any text editor — **Notepad** works fine. If you'd like a nicer editor, install [Visual Studio Code](https://code.visualstudio.com), open it, and use **File → Open Folder…** to open the `endfield-tracker` folder. See the [Configuration](#configuration) section below for what each setting does.
 
 ### Testing Manually
 
-To test the tracker with visible log output:
+If something doesn't seem to work and you want to see what's happening, you can run the tracker by hand in a terminal with log output:
 
-```bash
-node tracker.js
-```
+1. Open the extracted project folder in File Explorer.
+2. Click the address bar at the top, type `cmd`, and press Enter — this opens a terminal already pointed at the folder.
+3. Type the following and press Enter:
 
-The tracker will run in your terminal and display log messages. Start and stop the game to verify it's working correctly.
+   ```bash
+   node tracker.js
+   ```
+
+The tracker will run in that terminal and print log messages. Start and stop the game to verify it's detecting the process correctly. Close the terminal window to stop it.
 
 ### Uninstalling
 
-Run `uninstall.bat` to remove the automatic startup task. Your playtime data will be preserved in case you want to reinstall later.
+Right-click `uninstall.bat` and **Run as administrator** to remove the automatic startup task. Your playtime data in `%LOCALAPPDATA%\endfield-tracker\` is preserved in case you want to reinstall later.
 
 ## Usage
 
