@@ -23,10 +23,9 @@ The tracker polls every 5 seconds to check if `Endfield.exe` is running. When th
 
 ### Setup
 
-1. Right-click `install.bat` and select **Run as administrator**
-2. Double-click `launcher.vbs` to start the tracker for the first time
+1. Right-click `setup.bat` and select **Run as administrator**
 
-The installer creates a Windows scheduled task so the tracker starts automatically on future logins. Since the scheduled task only triggers on logon, you need to launch it manually the first time (or log out and back in).
+That's it — the script creates a Windows scheduled task and starts the tracker immediately. On future logins, it starts automatically. Alternatively, you can run `install.bat` (same thing but without auto-launching) and then double-click `launcher.vbs` to start manually.
 
 ### Testing Manually
 
@@ -162,17 +161,22 @@ Default settings (in `tracker.js`):
 ```
 endfield-tracker/
 ├── tracker.js       # Main tracker script (includes HTTP server)
+├── dashboard.html   # Dashboard page structure
+├── dashboard.css    # Dashboard styles
+├── dashboard.js     # Dashboard client-side logic
 ├── launcher.vbs     # Silent launcher (no console window)
-├── install.bat      # Installation script
+├── setup.bat        # Installation + auto-launch (recommended)
+├── install.bat      # Installation only (alternative)
 ├── uninstall.bat    # Uninstallation script
-├── playtime.txt     # Auto-generated human-readable playtime log
 └── README.md        # This file
 ```
 
 Data directory:
+
 ```
 %LOCALAPPDATA%\endfield-tracker/
-└── data.json        # Playtime data and session history
+├── data.json        # Playtime data and session history
+└── playtime.txt     # Auto-generated human-readable playtime log
 ```
 
 ## License
